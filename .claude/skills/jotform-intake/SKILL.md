@@ -574,24 +574,28 @@ a human — not a wall of per-field detail.
   This skill writes FieldId 12 ("Assistant/Scheduler Email Address"), which was already known and
   in active use before the remap. FieldId 35 surfaced as a likely duplicate. Don't switch to 35
   without confirming which one DonorDock actually treats as canonical — for now, keep using 12.
-- **"Member Tier" and "Copy Assistant?" FieldIds are unverified.** The skill's field catalog
-  previously (and wrongly) cited FieldId 31 for "Member Tier" — FieldId 31 is actually "Archetype"
-  per the remap above, so that citation was removed. Neither "Member Tier" nor "Copy Assistant?"
-  appears in the confirmed remap, so their real FieldIds (or whether they exist as distinct fields
-  at all — "Member Tier" may actually be "Membership Type", FieldId 2) are unknown. Treat both as
-  unverified: write them, then confirm on read-back before trusting the write, and flag to manual
-  entry if the value doesn't persist.
-- **Legacy contacts with a populated archived "Use_Chapter" custom field (FieldId 21) may still
-  reject writes.** As of an earlier diagnosis session, two long-tenured contacts (Kol Chu Birke,
-  Lauren Barra Rourke) had a stale value on this archived field, and every real write to them —
-  under both `mergeStrategy: 'merge'` (hard error: `"Custom field 'Use_Chapter' (21) is archived
-  and cannot be written"`) and `'replace'` (silent `confirmed: false`, no error) — failed to
-  persist. It's unconfirmed whether the broader MCP fixes above (Select-field/new-field writes
-  confirmed working) also resolved this specific archived-field interaction — retest on those two
-  contacts before assuming it's fixed. `add_badge` was unaffected by this issue throughout. If a
-  contact still hits this, flag it in the "Needs manual entry" list (Step 8) with the specific
-  field(s) and value(s) that wouldn't save, and note that DonorDock needs to clear that contact's
-  archived `Use_Chapter` value directly (not via the API) before automated writes will work on it
+- **"Member Tier" and "Copy Assistant?" do not exist as writable fields — confirmed, not just
+  unverified.** Tested directly against a clean contact: both labels come back `unresolved`
+  (unknown field name), and probing the one remaining gap in the catalog, FieldId 36, also came
+  back unresolved. The full field set (1–39, with 27/28 archived and 36 apparently never
+  assigned) is now accounted for, and neither field is in it. Don't attempt these writes going
+  forward — go straight to the "Needs manual entry" list in Step 8 with the value, and note that
+  DonorDock/staff need to clarify what these should map to (possibly "Membership Type", FieldId 2,
+  for Member Tier, and "Concierge Comms Flag (Yes/No)", FieldId 33, for Copy Assistant? — both
+  unconfirmed guesses based on thematic overlap, not verified equivalences, so don't write to
+  those FieldIds under these labels without confirming first).
+- **Archived "Use_Chapter" (FieldId 21) blocker is CONFIRMED still broken — retested after the
+  broader MCP fixes landed, no change.** Kol Chu Birke and Lauren Barra Rourke both still reject
+  every real custom-field write with the same behavior as before: hard error under
+  `mergeStrategy: 'merge'`, silent `confirmed: false` under `'replace'`. This includes the
+  corrected "Onboarding Survey Complete" field itself — it could not be set on either contact,
+  so both remain stuck without a completion marker regardless of the field-name fix. The broader
+  "Select-field/new-field writes confirmed working" fix above does not cover this specific
+  interaction. This is still an open DonorDock data issue on these two (and possibly other
+  long-tenured) contacts; `add_badge` remains unaffected. If a contact hits this, flag it in the
+  "Needs manual entry" list (Step 8) with the specific field(s) and value(s) that wouldn't save,
+  and note that DonorDock needs to clear that contact's archived `Use_Chapter` value directly
+  (not via the API) before automated writes — including the completion marker — will work on it
   again.
 
 ---
