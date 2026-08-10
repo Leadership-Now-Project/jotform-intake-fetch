@@ -281,10 +281,28 @@ Watch for ZIPs that arrive without their leading zero — DonorDock stores North
 | 2027+ | Jul 1 – Sep 30 | Q3 |
 | 2027+ | Oct 1 – Dec 31 | Q4 |
 
+**Skip this write entirely for `EXISTING_MEMBER_FORM_ID` submissions**, same reasoning as Member
+Since below: Cohort marks which intake class a member originally joined in. Re-deriving it from
+a V2 check-in survey's submission date would reassign a member's cohort to whenever they happened
+to resubmit the survey, not when they actually joined — e.g. a member onboarded in Q1 would
+incorrectly show as Q3 just for filling out a mid-year check-in. Only write Cohort on
+`ONBOARDING_FORM_ID` submissions.
+
 ### Political Affiliation — valid option strings
 
-Pass the survey answer as-is. Valid DonorDock values: `Democratic`, `Republican`,
-`Independent / Unaffiliated`, `Prefer not to say`, `Other`.
+Do not pass the survey answer as-is when it's "Independent / Unaffiliated" — DonorDock's actual
+option for this is `Independent` (confirmed by testing; `Independent / Unaffiliated` and
+`Unaffiliated` are both rejected with `"Invalid option selected"`). Map the survey's
+"Independent / Unaffiliated" answer to `Independent` before writing. Confirmed valid DonorDock
+values: `Democratic`, `Republican`, `Independent`. `Prefer not to say` and `Other` are what the
+form offers but have not been verified against DonorDock's actual picklist — verify on read-back
+the first time either comes through, and update this list once confirmed.
+
+DonorDock Select fields generally have this problem: the API doesn't expose a way to list a
+field's valid option IDs (every option-lookup endpoint 404s), so the MCP sends your label as raw
+text and DonorDock either accepts it or rejects it with "Invalid option selected" depending on
+whether it happens to match. Treat every Select-field write as unverified until you've seen it
+persist on read-back at least once for that exact value.
 
 ### Pay to Play — Boolean
 
@@ -308,9 +326,10 @@ history or not.
 V2 existing-member survey is already a DonorDock contact with a real, earlier Member Since —
 overwriting it with today's resubmission date would erase their actual join date (e.g. a member
 who joined in 2018 would incorrectly show as joining the day they filled out a check-in survey).
-Every other field in this step (Chapter, Cohort, Political Affiliation, Pay to Play, Archetype,
+Every other field in this step (Chapter, Political Affiliation, Pay to Play, Archetype,
 Membership Status, etc.) still writes normally regardless of which form the submission came
-from — this exception applies to Member Since only.
+from — **except Cohort**, which has the same `ONBOARDING_FORM_ID`-only exception, for the same
+reason (see the Cohort section above).
 
 ### Full set_contact_custom_fields call
 
@@ -330,7 +349,7 @@ set_contact_custom_fields({
     "Industry": "...",                          // FieldId 29, Select
     "Sector": "...",                            // FieldId 30, Select
     "Member Tier": "...",                       // FieldId 31, Select
-    "Cohort": "Q2",                              // FieldId 32, Select — derived
+    "Cohort": "Q2",                              // FieldId 32, Select — derived, ONBOARDING_FORM_ID only, omit for EXISTING_MEMBER_FORM_ID
     "Archetype Potential": "...",
     "Influence Style Signal": "...",
     "Network Strength Signal": "...",
@@ -388,15 +407,31 @@ skill does not add it and should not depend on it being present at the time this
 After DonorDock is complete, create or update the member's Klaviyo profile and enroll them
 in the Leadership Now Members list.
 
-### 7a — Subscribe and enroll
+### 7a — Verify first, then subscribe and enroll only if needed
 
-Call `subscribe_profile_to_marketing` with:
-- `email` — from survey
-- `subscriptions.email.marketing.consent` = "SUBSCRIBED"
-- List relationship: **Leadership Now Members** (list ID: `YqM4pm`)
+`subscribe_profile_to_marketing` requires interactive user confirmation on every call — it will
+not go through unattended (e.g. during a scheduled fetch-mode run with no one watching). Members
+are frequently already subscribed/enrolled by an earlier step in the onboarding process before
+this skill ever runs, so don't call it blindly — check first and only call it when it's actually
+needed:
 
-This call creates the profile if it doesn't exist, updates it if it does, and enrolls them
-in the list — all in one shot. It also returns the Klaviyo profile ID needed for 7b.
+1. Call `get_profiles` with `filter: 'equals(email,"{email}")'` and
+   `additional_fields_profile: ["subscriptions"]`.
+2. If a profile exists and `subscriptions.email.marketing.consent` is already `"SUBSCRIBED"`,
+   treat 7a as done — record the returned profile ID and skip straight to 7b. (This does not by
+   itself confirm list membership; if you need to be certain they're on the Leadership Now
+   Members list specifically, cross-check with `get_lists` and add via `add_profiles_to_list` if
+   missing — that call does not require interactive confirmation.)
+3. Otherwise (no profile, or not subscribed), call `subscribe_profile_to_marketing` with:
+   - `email` — from survey
+   - `subscriptions.email.marketing.consent` = "SUBSCRIBED"
+   - List relationship: **Leadership Now Members** (list ID: `YqM4pm`)
+
+   This call creates the profile if it doesn't exist, updates it if it does, and enrolls them
+   in the list — all in one shot. It also returns the Klaviyo profile ID needed for 7b. In an
+   unattended run, if this call comes back asking for confirmation that can't be obtained, don't
+   block the rest of the run on it — note it in the "Needs manual entry" list (Step 8) and
+   continue; DonorDock writes and badges are independent of this step.
 
 ### 7b — Write profile fields
 
@@ -498,6 +533,33 @@ a human — not a wall of per-field detail.
 - Everything else previously blocked (`update_employment`, Archetype/Archetype Potential,
   Influence Style Signal, Network Strength Signal) now writes successfully via the MCP and is
   handled directly in Steps 4–5 — there is nothing else on this list to skip.
+- **"Onboarding Survey" (the dedup/completion marker this skill's Step 0/2/7d all depend on)
+  cannot be written via the DonorDock MCP for ANY contact, not just legacy ones.** Confirmed by
+  testing on a clean contact with no archived-field baggage: the write comes back
+  `unresolved`/`confirmed: false` with a note that FieldId 33+ fields aren't exposed by the
+  public API. This is a real, currently-open problem with the dedup design in this skill, not
+  something a future run will work around — every fetch-mode run right now has no way to durably
+  mark a submission as fully processed via this field. Until this is redesigned (e.g. switching
+  the completion marker to a badge, which writes and reads reliably — see below), fetch-mode runs
+  should expect to re-examine the same submissions on every run and rely on judgment (does the
+  contact's data already match what this submission would produce?) rather than a clean boolean
+  check.
+- **Legacy contacts with a populated archived "Use_Chapter" custom field (FieldId 21) reject
+  every real write.** A small number of long-tenured contacts still carry a value on this
+  archived field from before "Chapter" existed. On those records, `update_contact` and
+  `set_contact_custom_fields` either hard-error with `"Custom field 'Use_Chapter' (21) is
+  archived and cannot be written"` (default `mergeStrategy: 'merge'`), or — with
+  `mergeStrategy: 'replace'` — return `success: false` with every field `confirmed: false` and
+  silently fail to persist any actual change (confirmed by testing both new fields and edits to
+  already-set fields; a write that doesn't change the current value is the only thing that
+  "succeeds"). Neither strategy can clear the archived field's stale value either. `add_badge`
+  and (per read-back) some `update_contact` calls appear unaffected, but this is inconsistent
+  enough not to rely on. This is a DonorDock data issue on those specific records, not a mapping
+  bug in this skill — confirmed by testing plain, non-legacy contacts (e.g. a fresh test
+  submission), where the same writes succeed normally. If a contact hits this, flag it in the
+  "Needs manual entry" list (Step 8) with the specific field(s) and value(s) that wouldn't save,
+  and note that DonorDock needs to clear that contact's archived `Use_Chapter` value before
+  automated writes will work on it again.
 
 ---
 
