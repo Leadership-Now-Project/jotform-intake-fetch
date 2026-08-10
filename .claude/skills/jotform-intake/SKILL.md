@@ -47,7 +47,9 @@ invocation), default to fetch mode.
 
 **Which window when not told:** if the run isn't labeled morning or afternoon, decide by the
 current time in America/Chicago — before 12:00 CT use the morning window, otherwise the
-afternoon window (see Step 0).
+afternoon window (see Step 0). If it's a Monday morning run, also apply the Monday catch-up
+window described in Step 0 — the routine doesn't run on Saturday or Sunday, so a plain
+"yesterday" lookback would silently skip weekend submissions.
 
 ---
 
@@ -72,13 +74,23 @@ Call `list_submissions` with:
 - `form_ids`: `[ONBOARDING_FORM_ID, EXISTING_MEMBER_FORM_ID]`
 - `filter.date_filter`:
   - **Afternoon run:** `[today, today]`
-  - **Morning run:** `[yesterday, today]` — picks up anything submitted after yesterday's
-    afternoon run.
+  - **Morning run, Tuesday–Friday:** `[yesterday, today]` — picks up anything submitted after
+    yesterday's afternoon run.
+  - **Morning run, Monday (catch-up window):** `[last Friday's date, today]`. The routine only
+    runs weekdays, so a plain "yesterday" (Sunday) window would silently miss anything submitted
+    Saturday or Sunday. Widen the start date back to the prior Friday so the whole weekend is
+    covered.
+  - **Any run following a gap longer than the above** (a run was missed, the routine was paused,
+    or this is the first run after setup): widen the start date back to the last date you can
+    confirm a run actually completed — don't assume a 1-day or 3-day gap if the actual gap is
+    longer.
 - `filter.is_filtered_by_rules`: `false`
 - `limit`: `50`
 
-`date_filter` is day-granularity only, so the morning and afternoon runs will overlap on the
-same day's records. That is expected — the dedup check below makes overlapping runs safe.
+`date_filter` is day-granularity only, so overlapping windows across runs — including the wider
+Monday and catch-up windows — are expected and safe: the dedup check below (the "Onboarding
+Survey" custom field) skips anyone already fully processed, so a wider window costs a few extra
+lookups, never a duplicate write.
 
 Record each submission's originating form_id alongside its parsed fields — Step 5 branches on
 it (new-member vs. existing-member survey) when writing Member Since.
@@ -464,7 +476,7 @@ result and roll them into the Step 9 digest.
 
 After processing all submissions in the run, output one digest:
 
-- **Run:** {date} {morning|afternoon} run
+- **Run:** {date} {morning|afternoon} run {— Monday catch-up window back to {date} | — catch-up window after a {N}-day gap, if applicable}
 - **Pulled:** N submissions in window (broken out by form: onboarding vs. existing-member)
 - **New / processed:** N
 - **Skipped (already onboarded):** N
