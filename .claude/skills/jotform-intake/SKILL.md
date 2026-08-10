@@ -95,18 +95,26 @@ lookups, never a duplicate write.
 Record each submission's originating form_id alongside its parsed fields — Step 5 branches on
 it (new-member vs. existing-member survey) when writing Member Since.
 
-### Dedup — the "Onboarding Survey" custom field is the processed marker
+### Dedup — the "Onboarding Survey Complete" custom field is the processed marker
 For each submission returned, before processing:
 1. Search DonorDock by the submission's email (`search_contacts`).
-2. If a contact exists, call `get_contact_custom_fields` and check whether **Onboarding Survey**
-   is already `true`. If so, this member's data was already merged in an earlier run —
-   **skip entirely.** Do not re-write fields, do not re-run Steps 5–7d.
+2. If a contact exists, call `get_contact_custom_fields` and check whether
+   **Onboarding Survey Complete** (FieldId 26, Boolean) is already `true`. If so, this member's
+   data was already merged in an earlier run — **skip entirely.** Do not re-write fields, do not
+   re-run Steps 5–7d.
 3. Otherwise, treat it as new or incomplete and run Steps 1–7d for that submission.
 
 **Note:** the **Onboarding Flow** badge is applied by a separate DonorDock automation, not by
 this skill, and may lag behind this run. Don't use it for dedup — use the Onboarding Survey
-custom field, which this skill controls directly and sets only once a submission is fully
-processed (see Step 7d).
+Complete custom field, which this skill controls directly and sets only once a submission is
+fully processed (see Step 7d).
+
+**Historical bug, now fixed:** this skill previously wrote and checked a field literally called
+"Onboarding Survey" — that label never existed in DonorDock, so every dedup check silently found
+nothing and every completion write silently failed. The real field is "Onboarding Survey
+Complete" (FieldId 26). This means dedup has likely never actually worked in any past run — every
+scheduled run may have been eligible to reprocess every previously-onboarded member. Worth
+checking run history for evidence of repeat processing on the same contacts.
 
 ### Field source in fetch mode
 Submissions from `list_submissions` arrive as structured answers (question label → answer),
@@ -146,24 +154,24 @@ Extract these fields (leave blank if not present):
 | Undergraduate Year | "Year Graduated" (second occurrence / "Year Graduated.1" in CSV) | FieldId 6 (Number) |
 | Industry | "What industry do you work in?" | FieldId 29 (Select) |
 | Sector | "What sector?" or similar | FieldId 30 (Select) |
-| Member Tier | Member tier field on form | FieldId 31 (Select) |
+| Member Tier | Member tier field on form | DonorDock custom field "Member Tier" — **FieldId unverified, see Known Limitations** |
 | Political Affiliation | "What is your current political party affiliation, if any?" | FieldId 11 (Select) |
 | Pay to Play | "Do you have Pay to Play Restrictions?" (Yes/No) | FieldId 20 (Boolean) — "Yes" → checkbox checked (true), "No" → unchecked (false) |
-| Archetype Potential | "Archetype Potential" field on form | DonorDock custom field "Archetype Potential" **and** Klaviyo profile property `archetype` |
-| Influence Style Signal | "Influence Style Signal" field on form | DonorDock custom field "Influence Style Signal" |
-| Network Strength Signal | "Network Strength Signal" field on form | DonorDock custom field "Network Strength Signal" |
-| LinkedIn URL | "What is your LinkedIn URL?" | Attempted write to contact LinkedIn URL field (best-effort — see Step 4) |
-| Copy Assistant? | "Should we copy your Assistant/Scheduler on all communications?" | DonorDock custom field "Copy Assistant?" (Boolean) |
-| Assistant Name | "What is your Assistant/Scheduler's name?" | DonorDock custom field "Assistant Name" (Text) |
-| Assistant Email | "What is your Assistant/Scheduler's email address?" | FieldId 12 (Text) |
+| Archetype Potential | "Archetype Potential" field on form | DonorDock custom field "Archetype Potential", FieldId 39, Select (confirmed distinct from FieldId 31 "Archetype", which this skill never writes) **and** Klaviyo profile property `archetype` |
+| Influence Style Signal | "Influence Style Signal" field on form | DonorDock custom field "Influence Style Signal", FieldId 37 (Select) |
+| Network Strength Signal | "Network Strength Signal" field on form | DonorDock custom field "Network Strength Signal", FieldId 38 (Select) |
+| LinkedIn URL | "What is your LinkedIn URL?" | contact.linkedInUsername — real, writable top-level field; full URLs are auto-normalized to the bare handle (see Step 4) |
+| Copy Assistant? | "Should we copy your Assistant/Scheduler on all communications?" | DonorDock custom field "Copy Assistant?" (Boolean) — **FieldId unverified, see Known Limitations** |
+| Assistant Name | "What is your Assistant/Scheduler's name?" | DonorDock custom field "Assistant/Scheduler Name", FieldId 34 (Text) |
+| Assistant Email | "What is your Assistant/Scheduler's email address?" | DonorDock custom field "Assistant/Scheduler Email Address", FieldId 12 (Text) — FieldId 35 is a likely-duplicate field of the same name; FieldId 12 is the one this skill writes |
 | Priority Interests | "Which of these Leadership Now 2025-26 key priorities..." (multi-select) | Badges **and** Klaviyo profile property `priority_focus_areas` |
 | Contribution Modes | "How are you best positioned to support this work right now?" (multi-select) | Badges |
 | Policy Expertise | "In which areas do you have policy expertise..." | Badges |
 | Member Notes | "Anything else you'd like us to know..." | contact.Description |
 | Submission Date | "Submission Date" | Used for Cohort derivation |
 
-Only write Assistant Name / Assistant Email / Copy Assistant? if the member actually entered an
-Assistant/Scheduler on the form — leave these blank otherwise.
+Only write Assistant/Scheduler Name / Assistant Email / Copy Assistant? if the member actually
+entered an Assistant/Scheduler on the form — leave these blank otherwise.
 
 **Address parsing:** The address arrives as one string like "555 California St San Francisco, CA, 94104".
 Parse it as: everything before the last comma-separated city block is Address1, then City, State abbreviation, Zip. Country defaults to "United States".
@@ -176,9 +184,10 @@ Parse it as: everything before the last comma-separated city block is Address1, 
 
 Before creating, search DonorDock for the member by email or name using search_contacts. If they already exist, skip create_contact and use update_contact instead with their contactId.
 
-**Fetch mode:** if the existing contact's **Onboarding Survey** custom field is already `true`,
-this submission's data was already merged in a prior run — skip it entirely (see Step 0 dedup).
-Only fall through to update_contact for a contact that exists but hasn't had survey data merged yet.
+**Fetch mode:** if the existing contact's **Onboarding Survey Complete** custom field is already
+`true`, this submission's data was already merged in a prior run — skip it entirely (see Step 0
+dedup). Only fall through to update_contact for a contact that exists but hasn't had survey data
+merged yet.
 
 Be aware that DonorDock carries substantial duplication, and duplicates often split one person's
 data across records — one has the current email, another has the employer. If several records
@@ -222,13 +231,15 @@ covers employer/jobTitle in one call and needs no extra step.)
 update_contact({ contactId, description: "..." })
 ```
 
-**LinkedIn URL (best-effort):**
+**LinkedIn URL:**
 ```
-update_contact({ contactId, linkedInUrl: "..." })
+update_contact({ contactId, linkedInUsername: "..." })
 ```
-Attempt this write whenever a LinkedIn URL was submitted. Social-field writes have been flaky
-via the API historically, so if the call errors or the value doesn't persist on read-back, add
-LinkedIn to the "Needs manual entry" list in Step 8 rather than blocking the rest of the run.
+`linkedInUsername` is a real, writable top-level contact field — pass the full submitted URL and
+it's auto-normalized to the bare handle. This used to be flaky via the API; that's now fixed, so
+write it whenever a LinkedIn URL was submitted. Still confirm on read-back once per run just in
+case, but don't expect it to fail — if it ever does, add it to the "Needs manual entry" list in
+Step 8 rather than blocking the rest of the run.
 
 ---
 
@@ -298,11 +309,11 @@ values: `Democratic`, `Republican`, `Independent`. `Prefer not to say` and `Othe
 form offers but have not been verified against DonorDock's actual picklist — verify on read-back
 the first time either comes through, and update this list once confirmed.
 
-DonorDock Select fields generally have this problem: the API doesn't expose a way to list a
-field's valid option IDs (every option-lookup endpoint 404s), so the MCP sends your label as raw
-text and DonorDock either accepts it or rejects it with "Invalid option selected" depending on
-whether it happens to match. Treat every Select-field write as unverified until you've seen it
-persist on read-back at least once for that exact value.
+Select-field writes generally resolve correctly server-side now (label strings are matched
+reliably) — the Independent/Unaffiliated mismatch above was a one-off wrong label in this skill's
+own docs, not a sign that Select fields are broadly unreliable. Still, any option string not
+listed above (or in a field's known-valid list elsewhere in this doc) should be treated as
+unverified until confirmed on read-back once.
 
 ### Pay to Play — Boolean
 
@@ -348,13 +359,13 @@ set_contact_custom_fields({
     "Pay to Play Restrictions?": true,          // FieldId 20, Boolean — from Yes/No answer
     "Industry": "...",                          // FieldId 29, Select
     "Sector": "...",                            // FieldId 30, Select
-    "Member Tier": "...",                       // FieldId 31, Select
+    "Member Tier": "...",                       // FieldId unverified — see Known Limitations
     "Cohort": "Q2",                              // FieldId 32, Select — derived, ONBOARDING_FORM_ID only, omit for EXISTING_MEMBER_FORM_ID
-    "Archetype Potential": "...",
-    "Influence Style Signal": "...",
-    "Network Strength Signal": "...",
-    "Assistant Name": "...",                    // only if provided
-    "Copy Assistant?": true,                    // only if provided, Boolean
+    "Archetype Potential": "...",               // FieldId 39, Select
+    "Influence Style Signal": "...",            // FieldId 37, Select
+    "Network Strength Signal": "...",           // FieldId 38, Select
+    "Assistant/Scheduler Name": "...",          // FieldId 34, Text — only if provided
+    "Copy Assistant?": true,                    // only if provided, Boolean — FieldId unverified, see Known Limitations
     "Membership Status": "Active - Current",    // set on every processed submission
   }
 })
@@ -364,8 +375,8 @@ Omit any field with a blank/null value (except Membership Status, which always g
 Verify the response shows `confirmed: true` for each field. Any field with `confirmed: false`
 goes to the manual entry list in Step 8.
 
-Do **not** include `"Onboarding Survey"` in this call — it is set separately, and last, in
-Step 7d, once everything else below has succeeded.
+Do **not** include `"Onboarding Survey Complete"` in this call — it is set separately, and last,
+in Step 7d, once everything else below has succeeded.
 
 ---
 
@@ -469,7 +480,7 @@ Only after Steps 5, 6, and 7 have all succeeded, make one final call:
 ```
 set_contact_custom_fields({
   contactId,
-  fields: { "Onboarding Survey": true }
+  fields: { "Onboarding Survey Complete": true }   // FieldId 26, Boolean
 })
 ```
 
@@ -489,8 +500,8 @@ Present a clean summary with:
 
 **Written successfully — DonorDock** — list every field, custom field, and badge saved,
 including Mobile Phone, Date of Birth, Membership Status ("Active - Current"), Onboarding
-Survey (checked), Archetype Potential, Influence Style Signal, Network Strength Signal, and
-Assistant details when provided.
+Survey Complete (checked), Archetype Potential, Influence Style Signal, Network Strength Signal,
+LinkedIn, and Assistant details when provided.
 
 **Written successfully — Klaviyo** — confirm:
 - Profile fields written (name, location, archetype, priority focus areas)
@@ -527,39 +538,61 @@ a human — not a wall of per-field detail.
 
 ## Known Limitations
 
-- **LinkedIn** is attempted via `update_contact` (Step 4) but social-field writes have a history
-  of failing silently or 404ing. Treat every LinkedIn write as best-effort and confirm on
-  read-back; fall back to manual entry if it doesn't stick.
-- Everything else previously blocked (`update_employment`, Archetype/Archetype Potential,
-  Influence Style Signal, Network Strength Signal) now writes successfully via the MCP and is
-  handled directly in Steps 4–5 — there is nothing else on this list to skip.
-- **"Onboarding Survey" (the dedup/completion marker this skill's Step 0/2/7d all depend on)
-  cannot be written via the DonorDock MCP for ANY contact, not just legacy ones.** Confirmed by
-  testing on a clean contact with no archived-field baggage: the write comes back
-  `unresolved`/`confirmed: false` with a note that FieldId 33+ fields aren't exposed by the
-  public API. This is a real, currently-open problem with the dedup design in this skill, not
-  something a future run will work around — every fetch-mode run right now has no way to durably
-  mark a submission as fully processed via this field. Until this is redesigned (e.g. switching
-  the completion marker to a badge, which writes and reads reliably — see below), fetch-mode runs
-  should expect to re-examine the same submissions on every run and rely on judgment (does the
-  contact's data already match what this submission would produce?) rather than a clean boolean
-  check.
-- **Legacy contacts with a populated archived "Use_Chapter" custom field (FieldId 21) reject
-  every real write.** A small number of long-tenured contacts still carry a value on this
-  archived field from before "Chapter" existed. On those records, `update_contact` and
-  `set_contact_custom_fields` either hard-error with `"Custom field 'Use_Chapter' (21) is
-  archived and cannot be written"` (default `mergeStrategy: 'merge'`), or — with
-  `mergeStrategy: 'replace'` — return `success: false` with every field `confirmed: false` and
-  silently fail to persist any actual change (confirmed by testing both new fields and edits to
-  already-set fields; a write that doesn't change the current value is the only thing that
-  "succeeds"). Neither strategy can clear the archived field's stale value either. `add_badge`
-  and (per read-back) some `update_contact` calls appear unaffected, but this is inconsistent
-  enough not to rely on. This is a DonorDock data issue on those specific records, not a mapping
-  bug in this skill — confirmed by testing plain, non-legacy contacts (e.g. a fresh test
-  submission), where the same writes succeed normally. If a contact hits this, flag it in the
-  "Needs manual entry" list (Step 8) with the specific field(s) and value(s) that wouldn't save,
-  and note that DonorDock needs to clear that contact's archived `Use_Chapter` value before
-  automated writes will work on it again.
+- **LinkedIn, employer/job title, Archetype Potential, Influence Style Signal, Network Strength
+  Signal, and Select-field/new-field writes in general are all confirmed working** via the MCP as
+  of the FieldId remap below. Nothing on this list needs a workaround anymore — write them
+  directly per Steps 4–5.
+- **FieldId 33+ was never a real platform limitation — it was a gap in this skill's own field
+  catalog**, and every field name below was wrong or unmapped as a result. Full remap, confirmed
+  by direct probing:
+
+  | FieldId | Label | DataType |
+  |---|---|---|
+  | 14 | Past Engagements | Select |
+  | 25 | Social Media Engagement | Select |
+  | 26 | Onboarding Survey Complete | Boolean |
+  | 27, 28 | (archived) | — rejected on write |
+  | 31 | Archetype | Select |
+  | 33 | Concierge Comms Flag (Yes/No) | Boolean |
+  | 34 | Assistant/Scheduler Name | Text |
+  | 35 | Assistant/Scheduler Email — likely duplicate of FieldId 12 | Text |
+  | 37 | Influence Style Signal | Select |
+  | 38 | Network Strength Signal | Select |
+  | 39 | Archetype Potential — confirmed distinct from FieldId 31 | Select |
+
+  The field set ends at 39 (FieldId 40 tested and confirmed not to exist).
+
+- **The dedup marker was the wrong field name — now fixed, but treat past runs as unreliable.**
+  This skill used to write/check a field called "Onboarding Survey", which never existed; the
+  real field is "Onboarding Survey Complete" (FieldId 26), now used throughout Steps 0/2/5/7d/8.
+  Every write to the old name was silently falling into `unresolved`, meaning dedup has likely
+  never actually worked — every past scheduled run may have been eligible to reprocess every
+  previously-onboarded member. If duplicate processing matters (e.g. duplicate badges, overwritten
+  manual edits), check recent run history for repeat writes to the same contacts before trusting
+  historical digests.
+- **FieldId 35 vs FieldId 12 (both "Assistant/Scheduler Email") — needs a canonical decision.**
+  This skill writes FieldId 12 ("Assistant/Scheduler Email Address"), which was already known and
+  in active use before the remap. FieldId 35 surfaced as a likely duplicate. Don't switch to 35
+  without confirming which one DonorDock actually treats as canonical — for now, keep using 12.
+- **"Member Tier" and "Copy Assistant?" FieldIds are unverified.** The skill's field catalog
+  previously (and wrongly) cited FieldId 31 for "Member Tier" — FieldId 31 is actually "Archetype"
+  per the remap above, so that citation was removed. Neither "Member Tier" nor "Copy Assistant?"
+  appears in the confirmed remap, so their real FieldIds (or whether they exist as distinct fields
+  at all — "Member Tier" may actually be "Membership Type", FieldId 2) are unknown. Treat both as
+  unverified: write them, then confirm on read-back before trusting the write, and flag to manual
+  entry if the value doesn't persist.
+- **Legacy contacts with a populated archived "Use_Chapter" custom field (FieldId 21) may still
+  reject writes.** As of an earlier diagnosis session, two long-tenured contacts (Kol Chu Birke,
+  Lauren Barra Rourke) had a stale value on this archived field, and every real write to them —
+  under both `mergeStrategy: 'merge'` (hard error: `"Custom field 'Use_Chapter' (21) is archived
+  and cannot be written"`) and `'replace'` (silent `confirmed: false`, no error) — failed to
+  persist. It's unconfirmed whether the broader MCP fixes above (Select-field/new-field writes
+  confirmed working) also resolved this specific archived-field interaction — retest on those two
+  contacts before assuming it's fixed. `add_badge` was unaffected by this issue throughout. If a
+  contact still hits this, flag it in the "Needs manual entry" list (Step 8) with the specific
+  field(s) and value(s) that wouldn't save, and note that DonorDock needs to clear that contact's
+  archived `Use_Chapter` value directly (not via the API) before automated writes will work on it
+  again.
 
 ---
 
