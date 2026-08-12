@@ -64,6 +64,18 @@ window described in Step 0 — the routine doesn't run on Saturday or Sunday, so
   Since handling below.
 - Run cadence: twice daily (see "Scheduling" section at the end). Run times 07:00 and
   16:00 America/Chicago (CT).
+- `KNOWN_BLOCKED_CONTACTS`: contacts confirmed stuck on DonorDock's archived-custom-field write
+  block (see "Known Limitations" below). Empty as of 2026-08-12
+  — self-maintained by Step 3 going forward: add a contactId here the first time it hits this
+  block, remove it once someone clears the archived field in the DonorDock UI and a retest
+  succeeds. Checking this list before attempting writes avoids the same known-stuck contact
+  generating a fresh-looking failure on every run.
+- `PENDING_MANUAL_ENTRY`: contacts held back from "Onboarding Survey Complete" because a
+  specific field wrote to a known-wrong value that this skill's tools couldn't correct (see Step
+  7d's "known-wrong value" case) — not a full archived-field block, just one or a few fields.
+  Track as `{ contactId, field, expectedValue, flaggedOn }`. Self-maintained: Step 7d adds an
+  entry here instead of setting the completion marker when it hits this case; Step 9's
+  reconciliation pass (below) checks and clears entries here once a human confirms the fix.
 
 If either form ID is blank, resolve it once with the JotForm `search` tool by form title
 (e.g. "Member Onboarding" / "Existing Member Survey") and record the numeric form ID in the
@@ -156,7 +168,7 @@ Extract these fields (leave blank if not present):
 | Sector | "What sector?" or similar | FieldId 30 (Select) |
 | Member Tier | Member tier field on form | DonorDock custom field "Member Tier" — **FieldId unverified, see Known Limitations** |
 | Political Affiliation | "What is your current political party affiliation, if any?" | FieldId 11 (Select) |
-| Pay to Play | "Do you have Pay to Play Restrictions?" (Yes/No) | FieldId 20 (Boolean) — "Yes" → checkbox checked (true), "No" → unchecked (false) |
+| Pay to Play | "Do you have Pay to Play Restrictions?" (Yes / No / I'm not sure) | FieldId 20 (Boolean) — "Yes" → checkbox checked (true); "No", "I'm not sure", or blank → omit the field entirely, leave DonorDock unset |
 | Archetype Potential | "Archetype Potential" field on form | DonorDock custom field "Archetype Potential", FieldId 39, Select (confirmed distinct from FieldId 31 "Archetype", which this skill never writes) **and** Klaviyo profile property `archetype` |
 | Influence Style Signal | "Influence Style Signal" field on form | DonorDock custom field "Influence Style Signal", FieldId 37 (Select) |
 | Network Strength Signal | "Network Strength Signal" field on form | DonorDock custom field "Network Strength Signal", FieldId 38 (Select) |
@@ -198,7 +210,13 @@ flag the duplication in the Step 8 summary so someone can merge them at the sour
 
 ## Step 3 — Create (or Update) the Contact
 
-Call `create_contact` with:
+If the resolved contactId is in `KNOWN_BLOCKED_CONTACTS` (Step 0 config), skip straight to Step 6
+— DonorDock will reject every write to this contact's fields until someone clears its archived
+custom field in the UI (see "Known Limitations" below). Badges (`add_badge`) and Klaviyo (Step 7) are unaffected by
+this, so still run those; just note in Step 8 that this member's custom-field data is pending a
+manual DonorDock fix and wasn't attempted.
+
+Otherwise, call `create_contact` with:
 - firstName, lastName
 - email
 - mainPhone
@@ -210,21 +228,60 @@ If the contact already exists, call `update_contact` with only the fields that a
 
 After creation, note the returned contactId — you will need it for all subsequent steps.
 
+**If this call returns `blockedByArchivedField`:** DonorDock is rejecting every write to this
+contact because of a stale value in an archived custom field. Stop attempting DonorDock field
+writes for this contact — skip the rest of Step 3/4/5 and go straight to Step 6 (badges, which
+are unaffected). Add the contactId to `KNOWN_BLOCKED_CONTACTS` in Step 0's config if not already
+there, and flag it in Step 8's summary with the guidance DonorDock returned.
+
 **Owner:** no action needed here — OwnerId now defaults to Lauren Barra Rourke automatically on
 the DonorDock side, so this skill does not need to set or flag it.
+
+**Name changes — check on every `EXISTING_MEMBER_FORM_ID` submission.** Split the survey's "Full
+Name" the same way as Step 1 (first space rule) and compare the result against the existing
+contact's current `FirstName`/`LastName`. If either differs, include the new `firstName`/
+`lastName` in the `update_contact` call for that contact — don't assume the DonorDock record is
+already current just because the contact matched on email. Last-name changes are the common case
+(marriage, divorce, correcting a maiden/married name) and are easy to miss silently since the
+contact still matches by email. Real example: Lauren Barra Rourke's DonorDock record had
+`LastName: "Rourke"`; her V2 survey's Full Name was "Lauren Barra Rourke" — a legitimate update
+that this skill would have missed if it only checked email for a match and left name fields alone.
+
+Flag any detected name change explicitly in the Step 8 summary (old value → new value) rather than
+silently folding it into the general "fields updated" list — it's a more sensitive change than
+e.g. an updated employer, and worth a human glancing at it once.
 
 ---
 
 ## Step 4 — Write Employer, Job Title, Description, and LinkedIn
 
+Skip this step entirely for a contact already routed to Step 6 in Step 3 (archived-field block).
+
 Make these `update_contact` calls if the values are non-empty:
 
 **Employer + job title:**
 ```
-update_contact({ contactId, employer: "...", jobTitle: "..." })
+update_employment({ contactId, employer: "...", jobTitle: "..." })
 ```
-(`update_employment` also works now as a direct alternative if preferred, but `update_contact`
-covers employer/jobTitle in one call and needs no extra step.)
+Use `update_employment`, not `update_contact`, for these two fields. DonorDock's UI shows
+Employer/Job Title inside a distinct "Employment" block (Employer has its own add/link control,
+separate from the flat contact fields) — `update_employment` is the tool that targets that block
+correctly and fuzzy-matches/links the Organization record. `update_contact` accepts an `employer`
+param too, but don't use it for this; treat that param as legacy.
+
+**Do not write Employer to a custom field.** FieldId 15 is a legacy custom field also labeled
+"Employer" that predates this skill and holds stale data on some older contacts. It is not part of
+this skill's mapping — never include `"Employer"` as a key in a `set_contact_custom_fields` call.
+The only place Employer belongs is `update_employment`, above.
+
+**Resolved 2026-08-12:** `update_employment` and `update_contact({ lastName: "..." })` previously
+failed on Lauren Barra Rourke's contact (3d98121d-6ffd-48f2-9949-7f00f8693ff8) with the same
+generic `"Field  must be a number"` error seen elsewhere in this doc — distinct from the
+archived-field block, since it hit the plain contact/employment endpoints rather than
+`set_contact_custom_fields`. Confirmed fixed later the same day: her name, employer, and job title
+all now persist correctly. Still attempt `update_employment` and the name-change `update_contact`
+call as normal and confirm on read-back rather than assuming success — if this class of failure
+resurfaces on another contact, flag it in Step 8 the same way, and don't retry beyond one attempt.
 
 **Description** (if "Anything else you'd like us to know" has content):
 ```
@@ -248,6 +305,15 @@ Step 8 rather than blocking the rest of the run.
 Call `set_contact_custom_fields` with all mappable custom fields below. Select fields accept
 label strings directly; pass values by field name — no FieldId lookup needed unless a write
 comes back `confirmed: false`.
+
+**Always re-derive Chapter and Cohort fresh from the current submission — never carry forward an
+existing DonorDock value as-is, even when reconstructing a full field payload for
+`mergeStrategy: 'replace'`.** Confirmed real case (2026-08-12): when rebuilding Lauren Barra
+Rourke's full custom-field set for a `replace` call, her pre-existing Chapter value ("New York")
+got carried forward unchanged instead of re-derived from her ZIP — which the table below actually
+maps to "Greater New York" for an NJ address. An existing record's derived fields may be stale,
+wrong, or from before this mapping table was corrected; only trust a fresh derivation from the
+submission's own data.
 
 ### Chapter — derive from state and ZIP
 
@@ -301,24 +367,53 @@ incorrectly show as Q3 just for filling out a mid-year check-in. Only write Coho
 
 ### Political Affiliation — valid option strings
 
-Do not pass the survey answer as-is when it's "Independent / Unaffiliated" — DonorDock's actual
-option for this is `Independent` (confirmed by testing; `Independent / Unaffiliated` and
-`Unaffiliated` are both rejected with `"Invalid option selected"`). Map the survey's
-"Independent / Unaffiliated" answer to `Independent` before writing. Confirmed valid DonorDock
-values: `Democratic`, `Republican`, `Independent`. `Prefer not to say` and `Other` are what the
-form offers but have not been verified against DonorDock's actual picklist — verify on read-back
-the first time either comes through, and update this list once confirmed.
+**Do not pass the survey's raw "Independent / Unaffiliated" text as-is — it will be rejected.**
+DonorDock validates Select values by exact string match, whitespace included, and the survey's
+text doesn't exactly match either real option below. Confirmed by direct testing on 2026-08-12:
+
+- `Independent / Unaffiliated` (space before **and** after the slash — the raw survey text) →
+  **rejected**: `"Invalid option selected for Political Affiliation: Independent / Unaffiliated"`.
+- `Independent/ Unaffiliated` (no space before the slash, one space after) → **valid**, confirmed
+  written and persisted. This is the real DonorDock option — verified directly against DonorDock's
+  own UI, where it's the exact string shown selected on a live member record.
+- `Independent` (bare word, no slash) → **also valid**, confirmed written and persisted. A
+  separate, distinct option from the one above, not a fallback for it.
+
+**Map the survey's "Independent / Unaffiliated" answer to the exact string `Independent/ Unaffiliated`**
+(no space before the slash) — it's the closer semantic match and the one actually in active use on
+real records, not the bare `Independent`. Confirmed valid DonorDock values: `Democratic`,
+`Republican`, `Independent`, `Independent/ Unaffiliated`. `Prefer not to say` and `Other` are what
+the form offers but have not been verified against DonorDock's actual picklist — verify on
+read-back the first time either comes through, and update this list once confirmed.
+
+This exact-whitespace sensitivity applies to every Select field this skill writes, not just this
+one — DonorDock has no API endpoint that returns a field's valid option list (confirmed: every
+variant of `/CustomFields/{id}/Options` 404s), so there's no way to validate a label before
+sending it. If a Select write ever comes back with `"Invalid option selected for X: <value>"`,
+check for a stray or missing space around a slash or other punctuation before assuming the option
+doesn't exist at all — it very often does, just spelled slightly differently than expected.
 
 Select-field writes generally resolve correctly server-side now (label strings are matched
-reliably) — the Independent/Unaffiliated mismatch above was a one-off wrong label in this skill's
-own docs, not a sign that Select fields are broadly unreliable. Still, any option string not
-listed above (or in a field's known-valid list elsewhere in this doc) should be treated as
+reliably) — the Independent/Unaffiliated mismatch above is a whitespace formatting issue, not a
+sign that Select fields are broadly unreliable. Still, any option string not listed above (or in a
+field's known-valid list elsewhere in this doc) should be treated as
 unverified until confirmed on read-back once.
 
 ### Pay to Play — Boolean
 
-Map the JotForm Yes/No answer directly: "Yes" → `true` (checkbox checked), "No" → `false`
-(checkbox unchecked).
+The JotForm question offers three options: "Yes", "No", "I'm not sure". Only "Yes" writes
+anything — include `"Pay to Play Restrictions?": true` in the `set_contact_custom_fields` call.
+For "No", "I'm not sure", or a blank answer, **omit the field entirely** from the call — do not
+write `false`. Leaving it unset (rather than explicitly unchecked) is the deliberate choice here:
+DonorDock reporting/filtering treats "no value" and "false" differently, and only a genuine "Yes"
+answer is a real, confirmed restriction worth recording — everything else is an absence of
+information, not a confirmed "no restriction."
+
+Note for historical data: earlier runs of this skill wrote explicit `false` for "No" answers
+before this distinction was decided (2026-08-12). Existing contacts may have a stale `false` on
+this field that now reads differently than a genuinely blank field would under the corrected
+mapping — worth a one-time cleanup pass if that distinction matters for reporting, though this
+skill only controls behavior going forward.
 
 ### Membership Status — set on every processed submission
 
@@ -356,7 +451,7 @@ set_contact_custom_fields({
     "Assistant/Scheduler Email Address": "...", // FieldId 12, Text — only if provided
     "Chapter": "Bay Area",                      // FieldId 16, Select — derived from ZIP
     "Member Since": "2026-01-18",               // FieldId 17, Date — ONBOARDING_FORM_ID only, omit for EXISTING_MEMBER_FORM_ID
-    "Pay to Play Restrictions?": true,          // FieldId 20, Boolean — from Yes/No answer
+    "Pay to Play Restrictions?": true,          // FieldId 20, Boolean — only if the answer was exactly "Yes"; omit for No/I'm not sure/blank
     "Industry": "...",                          // FieldId 29, Select
     "Sector": "...",                            // FieldId 30, Select
     "Member Tier": "...",                       // FieldId unverified — see Known Limitations
@@ -371,7 +466,11 @@ set_contact_custom_fields({
 })
 ```
 
-Omit any field with a blank/null value (except Membership Status, which always gets set).
+Omit any field with a blank/null value (except Membership Status, which always gets set). Pay to
+Play Restrictions? is a special case of this same rule — treat "No" and "I'm not sure" as
+equivalent to blank for this field specifically (see Pay to Play section above), not just a
+literally-empty answer.
+
 Verify the response shows `confirmed: true` for each field. Any field with `confirmed: false`
 goes to the manual entry list in Step 8.
 
@@ -475,7 +574,8 @@ filterable in Klaviyo — they can be used directly in segment conditions on
 
 ### 7d — Mark the submission complete
 
-Only after Steps 5, 6, and 7 have all succeeded, make one final call:
+Only after Step 3/4 (core contact fields — name, address, phone, employer/job title, LinkedIn,
+description) **and** Steps 5, 6, and 7 have all succeeded, make one final call:
 
 ```
 set_contact_custom_fields({
@@ -488,6 +588,33 @@ This is the completion marker: it confirms the survey data has been fully merged
 and it's what Step 0/Step 2 check on the next run to avoid reprocessing this member. Set it last
 and only on full success — if any earlier step failed outright, leave it unset so the next run
 retries the missing pieces.
+
+**Step 3/4 failures count too, not just 5/6/7.** A contact can have Steps 5–7 succeed fully while
+a core field from Step 3/4 silently fails (confirmed real case, 2026-08-12: Lauren Barra Rourke's
+custom fields, badges, and Klaviyo all wrote clean, while `update_contact`/`update_employment`
+failed on LastName, Employer, and Job Title). Checking only 5/6/7 would have let this marker get
+set as `true` on a record that was genuinely incomplete — defeating its purpose as a "fully
+merged" signal. Before this call, confirm on read-back that every Step 3/4 field you attempted to
+change actually persisted, not just that the write call didn't throw. If any Step 3/4 field didn't
+persist, skip this call entirely and flag it in Step 8, the same as a Step 5/6/7 failure would be.
+
+**A field that "succeeded" but holds a known-wrong value also blocks this marker.** Not every
+problem shows up as a failed write. Confirmed real case (2026-08-12, same contact): Pay to Play
+Restrictions? got stuck at `true` from a source outside this skill's own writes, while her survey
+answer was "No" (which should mean the field is unset, not `true` — see the Pay to Play section
+above). DonorDock's Boolean custom fields cannot be nulled via `merge` (rejects null/empty string)
+and `replace` does not actually drop fields omitted from the payload — despite its own description
+saying it replaces the whole object — so there is currently no way to correct this through this
+skill's tools once it happens. If a read-back shows a custom field holding a value that
+contradicts the submission's actual answer, treat that the same as a failed write: do not set
+Onboarding Survey Complete, and flag the specific field/discrepancy in Step 8 for manual
+correction in the DonorDock UI.
+
+In fetch mode specifically, also add an entry to `PENDING_MANUAL_ENTRY` (Step 0 config) —
+`{ contactId, field: "Pay to Play Restrictions?", expectedValue: "unset/No", flaggedOn: <date> }`
+— rather than only surfacing it in that one run's digest and losing track of it afterward. Step 9's
+reconciliation pass checks this list every run so the fix gets picked up whenever someone actually
+makes it, without waiting on a brand-new submission from that member to trigger reprocessing.
 
 ---
 
@@ -520,6 +647,30 @@ result and roll them into the Step 9 digest.
 
 ## Step 9 — Batch Digest (Fetch Mode Only)
 
+### 9a — Reconciliation pass: check PENDING_MANUAL_ENTRY before building the digest
+
+Before pulling new submissions (or after — order doesn't matter, but do this every run, not just
+when there's new activity), go through every entry in `PENDING_MANUAL_ENTRY` (Step 0 config):
+
+1. Call `get_contact_custom_fields` for the contact and check the flagged `field`.
+2. **If the current value now matches `expectedValue`:** don't clear the entry or set Onboarding
+   Survey Complete automatically — a value matching by coincidence isn't the same as confirming a
+   human actually went in and fixed it. Instead, add this contact to a "Pending confirmation"
+   section in the digest (below), asking directly: *"[Contact name]'s [field] now shows
+   [current value], matching what the survey expected — was this entered manually? Reply
+   confirming and I'll mark their Onboarding Survey Complete."* Leave the `PENDING_MANUAL_ENTRY`
+   entry in place until that confirmation comes back.
+3. **If a later message in the conversation confirms a specific pending item** (e.g. "yes, I
+   fixed Lauren's Pay to Play manually"), then and only then: call `set_contact_custom_fields`
+   with `{ "Onboarding Survey Complete": true }` for that contact, and remove the entry from
+   `PENDING_MANUAL_ENTRY`.
+4. **If the current value still doesn't match `expectedValue`:** leave the entry as-is, no digest
+   mention needed unless it's been pending an unusually long time.
+
+This is why the check happens even on runs with zero new submissions — a member's fix might land
+on the DonorDock side independent of any new form activity, and this is the only mechanism that
+picks that up.
+
 After processing all submissions in the run, output one digest:
 
 - **Run:** {date} {morning|afternoon} run {— Monday catch-up window back to {date} | — catch-up window after a {N}-day gap, if applicable}
@@ -528,6 +679,8 @@ After processing all submissions in the run, output one digest:
 - **Skipped (already onboarded):** N
 - **Per new member:** name + source form (New Member Onboarding / Existing Member Update) +
   DonorDock link + a one-line "needs manual entry" flag if any
+- **Pending confirmation (manual entry check):** any contact from 9a whose flagged field now
+  matches the expected value, awaiting a yes/no on whether it was entered manually
 - **Anomalies to review:** any failed write, any submission that could not be parsed
 
 If a Slack channel is configured for the routine, post this digest there via the Slack MCP so
@@ -581,18 +734,41 @@ a human — not a wall of per-field detail.
   at all — "Member Tier" may actually be "Membership Type", FieldId 2) are unknown. Treat both as
   unverified: write them, then confirm on read-back before trusting the write, and flag to manual
   entry if the value doesn't persist.
-- **Legacy contacts with a populated archived "Use_Chapter" custom field (FieldId 21) may still
-  reject writes.** As of an earlier diagnosis session, two long-tenured contacts (Kol Chu Birke,
-  Lauren Barra Rourke) had a stale value on this archived field, and every real write to them —
-  under both `mergeStrategy: 'merge'` (hard error: `"Custom field 'Use_Chapter' (21) is archived
-  and cannot be written"`) and `'replace'` (silent `confirmed: false`, no error) — failed to
-  persist. It's unconfirmed whether the broader MCP fixes above (Select-field/new-field writes
-  confirmed working) also resolved this specific archived-field interaction — retest on those two
-  contacts before assuming it's fixed. `add_badge` was unaffected by this issue throughout. If a
-  contact still hits this, flag it in the "Needs manual entry" list (Step 8) with the specific
-  field(s) and value(s) that wouldn't save, and note that DonorDock needs to clear that contact's
-  archived `Use_Chapter` value directly (not via the API) before automated writes will work on it
-  again.
+- **Archived custom fields can block all writes to a contact — confirmed mechanism, actively
+  detected by the MCP.** DonorDock rejects every write to a contact record (via `update_contact`
+  or `set_contact_custom_fields`, any `mergeStrategy`, any fields touched — including ones
+  completely unrelated to the archived field) while ANY archived custom field on that record
+  still carries a non-empty value. Known archived FieldIds: 21 (`Use_Chapter`), 27, 28. This isn't
+  a Text-vs-Select type conflict or anything about which field replaced which — it's a blanket
+  rule about archived fields carrying leftover data, confirmed independent of request payload
+  shape. No request shape from this skill or the MCP can route around it; it can only be cleared
+  by editing the record directly in the DonorDock UI (Custom Fields section — note that archived
+  fields don't appear in the standard quick-edit form, so this may require a different view).
+  `update_contact` and `set_contact_custom_fields` both check for this proactively and return a
+  structured `blockedByArchivedField` field instead of a generic error — see Step 3's handling.
+  Two contacts (Kol Chu Birke, Lauren Barra Rourke) hit this as of 2026-08-11; both were confirmed
+  cleared and writable again as of 2026-08-12. `add_badge` is unaffected by this issue throughout.
+- **Custom field writes used to fail if a contact had ANY existing Number-type field stored in
+  display format (e.g. Renewal Ask Amount as `"$2,500.00"`) — fixed 2026-08-12.**
+  `set_contact_custom_fields`'s merge mode resubmits every existing custom field alongside the
+  ones actually being changed, and DonorDock's GET returns Number fields formatted for display,
+  which its PUT then rejected on resubmission — causing an unrelated Select/Boolean write to fail
+  with a generic `"Field  must be a number"` error that didn't even name the field. This is now
+  fixed server-side (every Number field is normalized before resend, not just the ones being
+  written) and confirmed working against real contacts carrying this exact condition. Nothing to
+  change in how this skill calls `set_contact_custom_fields` — this was purely an MCP-side bug.
+- **No confirmed way to unset a Boolean custom field once it has any value — open issue,
+  2026-08-12.** `merge` rejects both `null` and `""` for a Boolean field
+  (`"Field  must be a boolean value"`), so there's no way to write "unset" directly. `replace`
+  was expected to work around this (build the full field set, omit the one to clear) but does
+  not: a `replace` call that omitted Pay to Play Restrictions? on a contact that already had it
+  set to `true` left it at `true` — every other field in the payload persisted correctly, but the
+  omitted field was not dropped, contradicting `replace`'s own description ("replaces the entire
+  CustomFields object with exactly what you provide"). Net effect: once a Boolean custom field has
+  been set to `true` incorrectly (from any source, including outside this skill), there is
+  currently no tool call that can clear it back to unset — only a manual edit in the DonorDock UI
+  can. If this comes up again, don't retry `replace` expecting different results; go straight to
+  flagging it for manual correction (see Step 7d).
 
 ---
 
