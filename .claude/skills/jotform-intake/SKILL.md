@@ -363,6 +363,57 @@ Whenever this skill merges survey data for a member (new contact or update), set
 **Membership Status** custom field to `"Active - Current"`. This reflects that the person has
 an active, current onboarding record — not a payment or dues status.
 
+### Last Updated Via MCP — stamp on every write, no matter how small
+
+Custom field **"Last Updated Via MCP"** (Date). Set it to **today's date** in every
+`set_contact_custom_fields` call this skill makes — include it alongside Membership Status even
+if every other field in the call is unchanged or blank. The point of this field is to answer "did
+automation touch this record, and when" as a signal distinct from DonorDock's own `ModifiedOn`
+(which also picks up manual staff edits and doesn't tell you *who* — human or MCP — made the
+change). So the rule is: if this skill made *any* write to a contact this run — one custom field,
+one badge, even just Step 4's LinkedIn write with nothing else — stamp this field before moving
+on. Don't reserve it for "big" updates or skip it because most of the submission was already
+current.
+
+This field is not in the probed FieldId catalog (`list_custom_fields`) yet — that catalog is a
+static list maintained server-side from prior direct probing, and a newly created field won't
+appear there until that catalog is updated. That's fine: `set_contact_custom_fields` matches by
+label string, not FieldId, so writing `"Last Updated Via MCP": "2026-08-19"` works whether or not
+the FieldId is known. Confirm on read-back the first time it's written for a given org, note the
+resolved FieldId here once seen, and treat it as unverified (flag to manual entry if
+`confirmed: false`) until then — same pattern as the other unverified fields in Known Limitations.
+
+### Archetype Potential / Influence Style Signal / Network Strength Signal — review before overwrite
+
+**Open item, not yet safe to write automatically:** as of this revision, the actual V2 existing-
+member form has no literal "Archetype Potential" / "Influence Style Signal" / "Network Strength
+Signal" question — only three scored checkbox questions (order 29–31 on the form: "When you care
+about an issue, what's your first move?", "How do you most often engage others...", "How would
+you describe your leadership presence and network?") whose answers feed `calcValues` toward an
+internal Influence/Engagement calculation. Until someone defines the actual derivation (which
+checkbox combination maps to which Select option on each of the three DonorDock fields), do not
+guess a value — leave these three fields unwritten and flag it in Step 8, exactly as done for
+Meg Langan's 2026-08-18 submission.
+
+**Once that derivation logic exists, add a review gate before overwriting, not a blind write:**
+these three fields represent an engagement/leadership signal that DonorDock or staff may have set
+deliberately based on real interaction history — a resurvey (`EXISTING_MEMBER_FORM_ID`) recomputing
+a "lower" or different signal from one check-in shouldn't silently erase that. So once the
+derivation is in place:
+1. Before writing any of the three, call `get_contact_custom_fields` and check the current value.
+2. If the field is currently blank, write the newly derived value — no review needed.
+3. If the field already has a value **and** the newly derived value differs from it, do **not**
+   overwrite automatically. Leave the existing value in place and add a line to the Step 8/
+   Step 9 anomalies list naming the contact, the field, the existing value, and the newly derived
+   value, so a human decides whether the update is warranted.
+4. If the existing value and the newly derived value match, writing it again is harmless — no
+   need to skip it just because it's unchanged (and doing so still counts toward the "Last
+   Updated Via MCP" stamp above).
+
+This mirrors the existing Member Since / Cohort protection pattern (never let a resurvey silently
+clobber a value that reflects the member's real history) — same reasoning, applied to a third
+category of field.
+
 ### Member Since — from submission date (ONBOARDING_FORM_ID only)
 
 Write the JotForm **Submission Date** as Member Since (FieldId 17), but only for submissions
@@ -404,6 +455,7 @@ set_contact_custom_fields({
     "Assistant/Scheduler Name": "...",          // FieldId 34, Text — only if provided
     "Copy Assistant?": true,                    // only if provided, Boolean — FieldId unverified, see Known Limitations
     "Membership Status": "Active - Current",    // set on every processed submission
+    "Last Updated Via MCP": "2026-08-19",       // Date, FieldId unverified — set on every processed submission, no matter how small the change
   }
 })
 ```
@@ -536,9 +588,9 @@ Present a clean summary with:
 `https://leadershipnowproject1.donordock.com/donors/detail/{contactId}`
 
 **Written successfully — DonorDock** — list every field, custom field, and badge saved,
-including Mobile Phone, Date of Birth, Membership Status ("Active - Current"), Onboarding
-Survey Complete (checked), Archetype Potential, Influence Style Signal, Network Strength Signal,
-LinkedIn, and Assistant details when provided.
+including Mobile Phone, Date of Birth, Membership Status ("Active - Current"), Last Updated Via
+MCP (today's date), Onboarding Survey Complete (checked), Archetype Potential, Influence Style
+Signal, Network Strength Signal, LinkedIn, and Assistant details when provided.
 
 **Written successfully — Klaviyo** — confirm:
 - Profile fields written (name, location, archetype, priority focus areas)
