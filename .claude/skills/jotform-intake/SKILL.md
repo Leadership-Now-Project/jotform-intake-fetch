@@ -97,7 +97,9 @@ it (new-member vs. existing-member survey) when writing Member Since.
 
 ### Dedup — the "Onboarding Survey Complete" custom field is the processed marker
 For each submission returned, before processing:
-1. Search DonorDock by the submission's email (`search_contacts`).
+1. Search DonorDock by the submission's email **and** by name (`search_contacts` twice — see the
+   full reconciliation logic in Step 2, which applies here too). Don't rely on an email match
+   alone.
 2. If a contact exists, call `get_contact_custom_fields` and check whether
    **Onboarding Survey Complete** (FieldId 26, Boolean) is already `true`. If so, this member's
    data was already merged in an earlier run — **skip entirely.** Do not re-write fields, do not
@@ -182,7 +184,30 @@ Parse it as: everything before the last comma-separated city block is Address1, 
 
 ## Step 2 — Check for Duplicate
 
-Before creating, search DonorDock for the member by email or name using search_contacts. If they already exist, skip create_contact and use update_contact instead with their contactId.
+**Search by both email and name — never just one.** Call `search_contacts` twice: once by the
+submission's email, once by the submission's full name. A single clean email match is not proof
+you have the right record — DonorDock's duplication means a person's real record can be sitting
+under a *different* email while a stray/wrong record holds the one on the form. Treat the two
+searches as independent evidence and reconcile them before writing anything:
+
+- Both empty → no existing contact, use `create_contact`.
+- Both agree on one contactId → that's your contact, proceed to `update_contact`.
+- They disagree, or either search returns more than one plausible person → **stop and
+  investigate before writing.** Pull `get_contact_profile` (or `get_contact_gifts` /
+  `get_contact_custom_fields`) on each candidate and compare:
+  - Does `Type` make sense? A contact whose `Type` is `ORGANIZATION`, or whose
+    `OrganizationName`/`DisplayName`/`Addressee` looks like a gift or transaction description
+    (e.g. "2024 Membership Dues") rather than a person's name, is a red flag — that is very
+    likely the wrong record even if the email matched. Don't treat an anomaly like this as
+    acceptable just because it was the only or first result.
+  - Which candidate has a real account number, actual gift/activity history, and DonorDock-native
+    fields already filled in (vs. one that looks freshly/accidentally created)? Prefer that one.
+  - If you still can't tell, do not guess — write nothing, and surface the ambiguity in the Step 8
+    "Needs manual entry"/anomalies section by name and both contactIds, so a human picks the right
+    one.
+
+Once you've settled on a contactId: if the contact already exists, skip `create_contact` and use
+`update_contact` instead with that contactId.
 
 **Fetch mode:** if the existing contact's **Onboarding Survey Complete** custom field is already
 `true`, this submission's data was already merged in a prior run — skip it entirely (see Step 0
@@ -191,8 +216,20 @@ merged yet.
 
 Be aware that DonorDock carries substantial duplication, and duplicates often split one person's
 data across records — one has the current email, another has the employer. If several records
-plausibly match, prefer the one with the most complete custom fields and real giving history, and
-flag the duplication in the Step 8 summary so someone can merge them at the source.
+plausibly match even after the check above, prefer the one with the most complete custom fields
+and real giving history, and flag the duplication in the Step 8 summary so someone can merge them
+at the source.
+
+**If you later discover a submission was written to the wrong contact** (e.g. a human points out
+the real record): don't just move on. Reconcile it — copy the written fields/badges over to the
+correct contact per this step's logic, and on the wrong contact: leave a dated note (e.g. in
+`description`, prefixed with the date) explaining what happened and pointing to the correct
+contactId, and unset **Onboarding Survey Complete** so a future run doesn't treat that record as
+someone's finished intake. Unsetting the flag on the wrong record does not, by itself, route the
+next run to the *right* record — that still depends on the dual email+name search above finding
+and preferring the correct contact. If the wrong record is the one holding the matching email,
+also flag that email conflict explicitly in Step 8 so a human can correct it at the source;
+otherwise the next run will land on the same wrong contact again.
 
 ---
 
