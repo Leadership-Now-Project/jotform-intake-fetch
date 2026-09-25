@@ -113,6 +113,12 @@ what specifically changed; the short version is in "What changed in this rewrite
   manual entry — this skill still does not write it to DonorDock), and one whenever a submission
   hits an error or a case the skill isn't confident how to handle. See the new Step 6b and the
   "Slack alerts" subsection under Step 8/9.
+- **This skill no longer writes to Klaviyo at all.** Per Marie Adrian's "DonorDock ↔ Klaviyo Sync —
+  Project Guide & Handoff" (Sept 24, 2026), Klaviyo profile creation, list enrollment, and property
+  writes (including `external_id` and `priority_focus_areas`) are now owned exclusively by her Zap
+  2 and Zap 3. The old Step 7 ("Create Klaviyo Profile and Enroll in List") is removed; this
+  skill's job now ends at DonorDock (badges included) plus the two Slack alerts above. See the new
+  Step 7 ("Mark the Submission Complete").
 
 ---
 
@@ -272,7 +278,7 @@ label.
 | Assistant Name | "Executive Assistant/Scheduler name:" *(was "What is your Assistant/Scheduler's name?" — note the trailing colon is part of the live label)* | DonorDock custom field "Assistant/Scheduler Name", FieldId 34 (Text) |
 | Assistant Email | "Executive Assistant/Scheduler email: " *(was "What is your Assistant/Scheduler's email address?" — trailing colon and space are part of the live label)* | DonorDock custom field "Assistant/Scheduler Email Address", FieldId 12 (Text) — FieldId 35 is a likely-duplicate field of the same name; FieldId 12 is the one this skill writes |
 | Who referred you to Leadership Now Project? | "Who referred you to Leadership Now Project?" *(new mapping — this question existed before but was never wired up)* | Custom field 18, "Referred By" (Text) — **and** custom field 22, "Member Referral?" (Boolean) set to `true` whenever this answer is non-blank. Both writes, always together |
-| Priority Interests | "Which of these Leadership Now key priorities are you most eager to engage in?" *(was "...2025-26 key priorities...")* (multi-select) | Badges **and** Klaviyo profile property `priority_focus_areas` |
+| Priority Interests | "Which of these Leadership Now key priorities are you most eager to engage in?" *(was "...2025-26 key priorities...")* (multi-select) | Badges — **DonorDock only, as of 2026-09-25; this skill no longer writes to Klaviyo at all (see "What changed" and Step 6's replacement of the old Step 7).** `priority_focus_areas` in Klaviyo is now Zap 3's concern, not this skill's. |
 | Contribution / Currency questions | Four separate questions, one each for Expansion, Risk, Balance of Power, and Talent (all phrased "How are you best positioned to support this work right now?" with a per-priority suffix) — **this replaced the old single repeated-header question; collect all four keys, not one shared header** | Badges — see "Currency badges" under Step 6 |
 | Policy Expertise | "Where does your policy expertise overlap with our Business Plan for America topic areas?" *(was "In which areas do you have policy expertise...")* | Badges |
 | Are you an active member of any of the following networks? | "Are you an active member of any of the following networks?" (multi-select, including two "(please specify)" options and a free-text Other) | Badges — `Affiliation: [Name]`, see Step 6 |
@@ -394,7 +400,7 @@ survey now provides that the sparse record was missing.
 
 If the resolved contactId is in `KNOWN_BLOCKED_CONTACTS` (Step 0 config), skip straight to Step 6
 — DonorDock will reject every write to this contact's fields until someone clears its archived
-custom field in the UI (see "Known Limitations" below). Badges (`add_badge`) and Klaviyo (Step 7) are unaffected by
+custom field in the UI (see "Known Limitations" below). Badges (`add_badge`) are unaffected by
 this, so still run those; just note in Step 8 that this member's custom-field data is pending a
 manual DonorDock fix and wasn't attempted.
 
@@ -766,72 +772,27 @@ a fetch-mode-only digest).
 
 ---
 
-## Step 7 — Create Klaviyo Profile and Enroll in List
+## Step 7 — Mark the Submission Complete
 
-After DonorDock is complete, create or update the member's Klaviyo profile and enroll them
-in the Leadership Now Members list.
+**As of 2026-09-25, this skill no longer touches Klaviyo at all.** Per Marie's "DonorDock ↔
+Klaviyo Sync — Project Guide & Handoff" (Sept 24, 2026), Klaviyo profile creation/updates are
+owned exclusively by Zap 2 (DonorDock contact → Klaviyo) and Zap 3 (DonorDock badge → Klaviyo);
+this skill's job stops at DonorDock. The old Step 7 ("Create Klaviyo Profile and Enroll in List" —
+`subscribe_profile_to_marketing`, `update_profile`, list enrollment) is removed entirely. Do not
+call any Klaviyo MCP tool from this skill. This also means:
 
-### 7a — Verify first, then subscribe and enroll only if needed
-
-`subscribe_profile_to_marketing` requires interactive user confirmation on every call — it will
-not go through unattended (e.g. during a scheduled fetch-mode run with no one watching). Members
-are frequently already subscribed/enrolled by an earlier step in the onboarding process before
-this skill ever runs, so don't call it blindly — check first and only call it when it's actually
-needed:
-
-1. Call `get_profiles` with `filter: 'equals(email,"{email}")'` (use the same email this skill
-   wrote to contact.Email — Prefill Email, falling back to Primary Email) and
-   `additional_fields_profile: ["subscriptions"]`.
-2. If a profile exists and `subscriptions.email.marketing.consent` is already `"SUBSCRIBED"`,
-   treat 7a as done — record the returned profile ID and skip straight to 7b. (This does not by
-   itself confirm list membership; if you need to be certain they're on the Leadership Now
-   Members list specifically, cross-check with `get_lists` and add via `add_profiles_to_list` if
-   missing — that call does not require interactive confirmation.)
-3. Otherwise (no profile, or not subscribed), call `subscribe_profile_to_marketing` with:
-   - `email` — from survey (Prefill Email / Primary Email, as above)
-   - `subscriptions.email.marketing.consent` = "SUBSCRIBED"
-   - List relationship: **Leadership Now Members** (list ID: `YqM4pm`)
-
-   This call creates the profile if it doesn't exist, updates it if it does, and enrolls them
-   in the list — all in one shot. It also returns the Klaviyo profile ID needed for 7b. In an
-   unattended run, if this call comes back asking for confirmation that can't be obtained, don't
-   block the rest of the run on it — note it in the "Needs manual entry" list (Step 8) and
-   continue; DonorDock writes and badges are independent of this step.
-
-### 7b — Write profile fields
-
-Call `update_profile` on the returned profile ID with:
-
-| Klaviyo Field | Source |
-|---|---|
-| `first_name` | From survey |
-| `last_name` | From survey |
-| `location.address1` | From survey |
-| `location.city` | From survey |
-| `location.region` | Normalized state abbreviation (see the Step 1 State normalization table) |
-| `location.zip` | From survey |
-| `location.country` | "United States" (default) |
-| `properties.priority_focus_areas` | Priority Interests list from survey (array of the selected priority labels) |
-| `external_id` | The DonorDock contactId resolved in Step 2/3 — set this on every profile write so a future prefill link for this member can carry `prefillDonordock` (see the `jotform-prefill` skill's "Downstream" section). Not a `properties.*` key — `external_id` is a top-level Klaviyo profile field. |
-
-**`properties.archetype` is no longer written** — there is no survey-sourced archetype value
-anymore (see "What changed in this rewrite"). If Klaviyo segmentation still needs an archetype
-property, it has to be sourced from DonorDock's own Archetype field by a separate process, not
-from this skill's Klaviyo write.
-
-### 7c — Enrollment notes
-
-- `subscribe_profile_to_marketing` must always be called **before** `update_profile` — it
-  returns the profile ID the latter requires.
-- Klaviyo matches profiles by email — if the profile already exists it will update in place,
-  not create a duplicate.
-- Do **not** enroll in Day 1 flow here — that is triggered by the separate Enrollment Bridge
-  Zap (dues paid in DonorDock → Klaviyo Day 1 flow), which Marie owns.
-
-### 7d — Mark the submission complete
+- **No `external_id` write here either.** The DonorDock contact ID reaching Klaviyo's `external_id`
+  field is handled by Marie's Zap 2 / the one-time backfill, not by this skill.
+- **Priority Interests only becomes DonorDock badges now** (Step 6) — the Klaviyo
+  `priority_focus_areas` property this skill used to write is Zap 3's concern.
+- **Archetype remains entirely out of scope** (unchanged from the Sept 14 rewrite) — and per
+  Marie's doc, the only valid archetype values anywhere in this pipeline are **Learner, Value
+  Contributor, Capital Provider, and Strategic Leader**. Never write "Amplifier" or "Expertise" —
+  those are retired names. This skill doesn't write archetype at all, so this is here as a
+  reference for anyone extending the skill later, not a behavior change.
 
 Only after Step 3/4 (core contact fields — name, address, phone, employer/job title, LinkedIn,
-description) **and** Steps 5, 6, and 7 have all succeeded, make one final call:
+description) **and** Steps 5 and 6 have all succeeded, make one final call:
 
 ```
 set_contact_custom_fields({
@@ -846,7 +807,7 @@ Step 0's dedup section) — custom field 41 does that job now. Set field 26 last
 success; if any earlier step failed outright, leave it unset so the next run retries the missing
 pieces.
 
-**Step 3/4 failures count too, not just 5/6/7.** A contact can have Steps 5–7 succeed fully while
+**Step 3/4 failures count too, not just 5/6.** A contact can have Steps 5–6 succeed fully while
 a core field from Step 3/4 silently fails. Before this call, confirm on read-back that every Step
 3/4 field you attempted to change actually persisted, not just that the write call didn't throw.
 If any Step 3/4 field didn't persist, skip this call entirely and flag it in Step 8.
@@ -878,9 +839,10 @@ including Membership Status ("Active - Current"), Onboarding Survey Complete (ch
 Most Recent Member Survey date, Onboarding Survey Completed On date (if this was the first
 write), LinkedIn, Referred By/Member Referral (if provided), and Assistant details when provided.
 
-**Written successfully — Klaviyo** — confirm:
-- Profile fields written (name, location, priority focus areas)
-- Enrolled in: Leadership Now Members (YqM4pm)
+**This skill does not write to Klaviyo (as of 2026-09-25)** — Klaviyo profile creation, list
+enrollment, and property writes are Zap 2/Zap 3's job per Marie's DonorDock ↔ Klaviyo Sync project.
+Don't include a "Written successfully — Klaviyo" section in this summary; if Klaviyo needs
+verifying, that's a separate check against the Zaps, not this skill's output.
 
 **Needs manual entry in DonorDock** — list every blocked field with the value so staff can paste it in:
 - LinkedIn: {value} — only if the Step 4 write failed or didn't persist
@@ -1064,8 +1026,9 @@ scheduled task would not be reliable here):
    run the jotform-intake skill in **fetch mode** (the Onboarding form only — see "How This Skill
    Runs"), determining morning vs. afternoon from the current time in America/Chicago, and the
    Monday catch-up window per Step 0.
-3. Attach the **JotForm, DonorDock, and Klaviyo** connectors (plus Slack if you want the digest
-   posted).
+3. Attach the **JotForm, DonorDock, and Slack** connectors. **Do not attach a Klaviyo connector for
+   this routine** — as of 2026-09-25 this skill makes no Klaviyo calls at all; Klaviyo writes
+   happen exclusively through Marie's Zaps, outside this skill.
 4. Add **two scheduled triggers** on the same routine — 07:00 and 16:00 America/Chicago (CT),
    **Monday through Friday only.** No weekend firings.
 
