@@ -93,6 +93,29 @@ what specifically changed; the short version is in "What changed in this rewrite
 
 ---
 
+## What changed in this update (2026-09-25)
+
+- **DonorDock contact ID is now the primary match key (Step 2)**, ahead of Prefill Email. It
+  arrives as a new hidden, locked field on the form — **"Prefill DonorDock ID"** (qid 118, unique
+  name `prefillDonordock`) — populated the same way Prefill Email is: from the personalized link
+  Klaviyo sends. When it's present, use it to fetch the contact directly
+  (`get_contact_profile`/`get_contact_custom_fields` by contactId) instead of searching by email —
+  it's an exact key, so there's no duplicate-matching ambiguity to resolve. Prefill Email remains
+  the fallback for a submission with no contact ID (a cold submission with no personalized link),
+  and Primary Email remains the fallback after that. See Step 1 and Step 2.
+- **New "Willing to host" badge.** A "Yes" answer to the space-hosting question (qid 114, unique
+  name `leadershipNow`) adds the `Willing to host` badge to the contact. See Step 1 and Step 6.
+- **Affiliation badges now check for a near-duplicate before creating a new one** — e.g. an "Other"
+  answer of "New Jersey Democrats" should attach to an existing `Affiliation: NJ Democrats` badge
+  rather than spawning a second, near-identical one. See Step 6.
+- **Two new real-time Slack alerts to #onboarding-survey-tasks**, distinct from the existing
+  end-of-run digest (Step 9): one whenever "Any other academic affiliations?" is filled in (for
+  manual entry — this skill still does not write it to DonorDock), and one whenever a submission
+  hits an error or a case the skill isn't confident how to handle. See the new Step 6b and the
+  "Slack alerts" subsection under Step 8/9.
+
+---
+
 ## How This Skill Runs — Two Modes
 
 **Fetch mode (default, scheduled).** The normal weekday operation. Pulls only from the **2026
@@ -135,6 +158,11 @@ exact range.
   value" case). Track as `{ contactId, field, expectedValue, flaggedOn }`. Self-maintained: Step 7d
   adds an entry here; Step 9's reconciliation pass checks and clears entries once a human confirms
   the fix.
+- `SLACK_ALERT_CHANNEL`: `onboarding-survey-tasks` (confirmed live private Slack channel,
+  created 2026-09-25). Destination for both new real-time alerts (Step 6b's academic-affiliations
+  flag and Step 8/9's error/questionable-response flag) as well as, going forward, the Step 9 batch
+  digest — post the digest here too rather than to a separately-configured channel, since this
+  channel was set up specifically for this routine.
 
 If `ONBOARDING_FORM_ID` is blank, resolve it once with the JotForm `search` tool by form title
 ("2026 Member Onboarding Survey") and record the numeric form ID in the config above so future
@@ -222,6 +250,7 @@ label.
 
 | Field | JotForm Question (current label) | DonorDock / Klaviyo Target |
 |---|---|---|
+| DonorDock Contact ID | "Prefill DonorDock ID" (hidden, locked field, qid 118, unique name `prefillDonordock`) | **New primary match key (Step 2)** — when present, resolves the contact directly with no search needed |
 | First Name | Split from "Full Name" on first space | contact.FirstName |
 | Last Name | Everything after the first space in "Full Name" | contact.LastName |
 | Primary Email | "Primary Email" | Used only as a fallback match key / fallback for contact.Email if Prefill Email is blank |
@@ -248,6 +277,7 @@ label.
 | Policy Expertise | "Where does your policy expertise overlap with our Business Plan for America topic areas?" *(was "In which areas do you have policy expertise...")* | Badges |
 | Are you an active member of any of the following networks? | "Are you an active member of any of the following networks?" (multi-select, including two "(please specify)" options and a free-text Other) | Badges — `Affiliation: [Name]`, see Step 6 |
 | Member Notes | "Anything else you'd like us to know..." | contact.Description |
+| Willing to host | "Leadership Now is often looking for space to host member convenings and events. Could we reach out to ask you about hosting at your home, office, or a social club?" (qid 114, unique name `leadershipNow`, Yes/No) | Badge — `Willing to host`, added only on "Yes" (see Step 6) |
 | Submission Date | "Submission Date" | Used for custom fields 40/41 |
 
 Only write Assistant/Scheduler Name / Assistant Email / Copy Assistant? if the member actually
@@ -326,11 +356,21 @@ to the Secondary Address State answer if it's ever mapped to a DonorDock or Klav
 
 ## Step 2 — Check for Duplicate
 
-Before creating, search DonorDock for the member. **Match priority: Prefill Email first, falling
-back to Primary Email if Prefill Email is blank.** Use name only as a secondary check — if the
+Before creating, resolve the contact. **Match priority, as of 2026-09-25: DonorDock Contact ID
+first (the new "Prefill DonorDock ID" field) — falling back to Prefill Email if the contact ID is
+blank, and to Primary Email if both are blank.** Use name only as a secondary check — if the
 matched contact's name has changed (see Step 3's name-change handling), that's a flag to review,
-not a reason to reject the match; email is the primary key precisely because names change and
-emails (via the Klaviyo-locked Prefill Email field) mostly don't.
+not a reason to reject the match; the contact ID (and, one step down, email via the Klaviyo-locked
+Prefill Email field) is the primary key precisely because names change and these mostly don't.
+
+**When the Contact ID is present, skip `search_contacts` entirely** — call `get_contact_profile`
+(and `get_contact_custom_fields`) directly with that contactId. This is an exact key, not a
+fuzzy match, so there's no duplicate-record ambiguity to resolve the way there is with an
+email-only match. If the contactId comes back not-found (a stale or malformed value — the record
+was deleted, or the link is old), fall back to the email-based match below and flag the mismatch
+in Step 8 rather than silently failing.
+
+**Email-based fallback (only when Contact ID is blank), unchanged from before:**
 
 If they already exist, skip create_contact and use update_contact instead with their contactId.
 
@@ -358,7 +398,11 @@ custom field in the UI (see "Known Limitations" below). Badges (`add_badge`) and
 this, so still run those; just note in Step 8 that this member's custom-field data is pending a
 manual DonorDock fix and wasn't attempted.
 
-Otherwise, call `create_contact` with:
+If a Contact ID was resolved in Step 2, there is no `create_contact` call to make at all — the
+contact already exists; go straight to `update_contact` with whatever fields are changing.
+
+Otherwise (no Contact ID, and no email match either — a genuinely new person), call `create_contact`
+with:
 - firstName, lastName
 - email — **from Prefill Email, falling back to Primary Email** (see Step 1)
 - mainPhone
@@ -608,6 +652,16 @@ Only Priority: Policy, Priority: Talent, and Priority: Expand existed in DonorDo
 audit — Priority: Risk and Priority: Balance of Power get created on first write. That's expected
 and fine; just watch for a typo forking the set on that first write.
 
+### Willing to host — from the space-hosting question
+
+If the answer to "Leadership Now is often looking for space to host member convenings and events.
+Could we reach out to ask you about hosting at your home, office, or a social club?" (qid 114,
+`leadershipNow`) is **"Yes"**, add the badge `Willing to host`. On "No" or a blank answer, add
+nothing — don't add an inverse/negative badge, and don't remove an existing `Willing to host`
+badge on a resubmission that now answers "No" (that's a change worth a human glance, not an
+automatic badge removal — flag it in Step 8 if a member's answer flips from Yes to No on a later
+submission).
+
 ### Currency badges (replaces "Contribution:") — from the four priority-support questions
 
 The old single "How are you best positioned to support this work right now?" question was
@@ -655,9 +709,60 @@ badging). Examples:
   Association" → `Affiliation: MIT Alumni Association`
 - Other, free text "Milken Young Leaders Circle" → `Affiliation: Milken Young Leaders Circle`
 
+**Before creating a new `Affiliation: [Name]` badge, check for a near-duplicate that already
+exists (2026-09-25).** DonorDock has no fuzzy-search on badge names, so pull the current badge list
+(`list_badges`, or `get_contact_profile`'s badges if that's cheaper) and compare the candidate name
+against every existing `Affiliation: *` badge using this normalization, in order:
+
+1. **Case- and whitespace-insensitive exact match** on the candidate vs. an existing badge's name
+   (after trimming and collapsing internal whitespace) — if equal, use the existing badge, don't
+   create a new one.
+2. **State-abbreviation expansion** — if the candidate or an existing badge contains a two-letter
+   token that matches a US state abbreviation (use the same 50-state table as Step 1's Chapter/state
+   normalization), expand it to the full state name before re-comparing. This is exactly the "NJ
+   Democrats" vs. "New Jersey Democrats" case: both normalize to "New Jersey Democrats" and match.
+3. **Token containment** — if every significant word (ignore "the", "of", "and", punctuation) in the
+   shorter name appears, in any order, in the longer name, treat them as the same badge (e.g.
+   "Aspen Global Leadership Network" vs. "Aspen Institute / Aspen Global Leadership Network").
+4. If none of the above matches anything, create the new badge as usual.
+
+When a match is found under 2 or 3, **attach the badge using its existing exact name** — don't
+rename the existing badge to the new submission's spelling, and don't create a second badge just
+because the wording differs. Flag the merge in Step 8 ("matched '<submitted text>' to existing
+badge '<existing name>'") so a human can sanity-check it, since this is a heuristic, not an exact
+match, and an overly aggressive merge (e.g. two genuinely different regional chapters of the same
+national org) is a worse outcome than an occasional near-duplicate badge. If two existing badges
+both plausibly match, don't guess — flag it in Step 8 and skip creating/attaching either until a
+human resolves which one is correct.
+
 **Do not add an "Onboarding Flow" badge here.** That badge is applied automatically by a
 separate DonorDock automation once its own conditions are met on the contact record — this
 skill does not add it and should not depend on it being present at the time this run finishes.
+
+---
+
+## Step 6b — Slack alert: "Any other academic affiliations?" (2026-09-25)
+
+This skill still does not have a DonorDock destination for "Any other academic affiliations?" (qid
+93) — see Step 1's "does not map" list. Rather than silently dropping it, **whenever this answer is
+non-blank, post an alert to the `onboarding-survey-tasks` Slack channel** (`SLACK_ALERT_CHANNEL`,
+Step 0) with enough detail for a human to enter it manually:
+
+```
+New academic affiliation to enter manually
+Member: {firstName} {lastName} — {DonorDock link}
+Answer: "{the raw text}"
+Likely field: the new Academic Affiliations custom fields (FieldId 51 "Secondary Graduate Academic
+Affiliation" / FieldId 52 "Secondary Undergraduate Academic Affiliation") — pick whichever applies,
+or split across both if the answer names more than one affiliation.
+```
+
+**Do not write this to DonorDock automatically** — the whole point of this alert is that a human
+reviews and enters it, since this skill still doesn't have a confirmed, confident mapping from this
+free-text answer to one of the two custom fields. Post the alert whether the submission otherwise
+succeeds or fails — an unmapped answer is worth flagging on every occurrence, not just when
+something else also goes wrong. In single-submission mode, post it the same way (don't hold it for
+a fetch-mode-only digest).
 
 ---
 
@@ -707,6 +812,7 @@ Call `update_profile` on the returned profile ID with:
 | `location.zip` | From survey |
 | `location.country` | "United States" (default) |
 | `properties.priority_focus_areas` | Priority Interests list from survey (array of the selected priority labels) |
+| `external_id` | The DonorDock contactId resolved in Step 2/3 — set this on every profile write so a future prefill link for this member can carry `prefillDonordock` (see the `jotform-prefill` skill's "Downstream" section). Not a `properties.*` key — `external_id` is a top-level Klaviyo profile field. |
 
 **`properties.archetype` is no longer written** — there is no survey-sourced archetype value
 anymore (see "What changed in this rewrite"). If Klaviyo segmentation still needs an archetype
@@ -780,6 +886,11 @@ write), LinkedIn, Referred By/Member Referral (if provided), and Assistant detai
 - LinkedIn: {value} — only if the Step 4 write failed or didn't persist
 - Any custom field that came back `confirmed: false`
 - Any Prefill Email / Primary Email mismatch flagged in Step 1
+- Any Contact ID that didn't resolve to a real record, requiring the email-based fallback (Step 2)
+- Any "Any other academic affiliations?" answer — also Slack-alerted per Step 6b, list it here too
+  so it's not solely dependent on someone having seen the Slack post
+- Any Affiliation badge merge decision flagged in Step 6 (near-duplicate matched, or two plausible
+  matches left unresolved)
 
 The "Needs manual entry" section is just as important as the successes — staff rely on it to complete the intake.
 
@@ -822,9 +933,32 @@ After processing all submissions in the run, output one digest:
 - **Anomalies to review:** any failed write, any submission that could not be parsed, any
   Prefill Email / Primary Email mismatch
 
-If a Slack channel is configured for the routine, post this digest there via the Slack MCP so
-the team has visibility without opening Claude. Keep it to the counts plus anything that needs
+Post this digest to `SLACK_ALERT_CHANNEL` (`onboarding-survey-tasks`, Step 0) via the Slack MCP
+so the team has visibility without opening Claude. Keep it to the counts plus anything that needs
 a human — not a wall of per-field detail.
+
+### Real-time error / questionable-response alerts (2026-09-25) — separate from the digest above
+
+In addition to the end-of-run digest, post an immediate Slack message to `SLACK_ALERT_CHANNEL` the
+moment any of the following happens during a submission, in either mode — don't hold it for the
+digest:
+
+- A DonorDock write fails outright, or a `blockedByArchivedField` response is hit (Step 3).
+- Any `set_contact_custom_fields` field comes back `confirmed: false`, or a read-back shows a
+  value that contradicts the submission (Step 7d).
+- A Select/dropdown value doesn't match any known option (a Political Affiliation, Industry,
+  Sector, school, etc. that fails the exact-string match in Step 5).
+- Prefill Email and Primary Email disagree (Step 1).
+- Two existing Affiliation badges both plausibly match a candidate name, and the skill can't
+  pick one (Step 6).
+- Any other point where this skill genuinely isn't sure what the right action is — that
+  uncertainty is itself worth a human's attention in real time, not just a mention buried in an
+  end-of-run count.
+
+Each alert should name the member (name + DonorDock link when a contactId is known), what
+specifically is wrong or uncertain, and what this skill did as a result (skipped the field, left
+Onboarding Survey Complete unset, proceeded with a fallback, etc.) — enough for someone to act on
+the Slack message alone without re-opening the run.
 
 ---
 
@@ -901,6 +1035,20 @@ a human — not a wall of per-field detail.
   previously documented** — populated on 4 of 5 sampled contacts as of the 2026-09 field audit,
   not just "a few older contacts." A data-cleanup item, not something this skill's code needs to
   change (it already only ever writes via `update_employment`, never to field 15).
+- **Contact-ID matching (Step 2) is new and unconfirmed against a large batch as of 2026-09-25.**
+  The "Prefill DonorDock ID" field exists on the live form and the mapping is in place, but this
+  hasn't yet been exercised against a real submission carrying a populated value — confirm on the
+  first live submission that actually arrives with a non-blank `prefillDonordock` before trusting
+  it fully for a scheduled run.
+- **Affiliation badge fuzzy-merge (Step 6) is a heuristic, not an exact-match system.** It will
+  occasionally merge two badges that a human would have kept separate, or miss a genuine match
+  worded in a way the three rules don't cover. Every merge is flagged in Step 8 specifically so
+  this can be caught and corrected rather than silently accumulating.
+- **The academic-affiliations and error/questionable-response Slack alerts (Step 6b, Step 9) are
+  new as of 2026-09-25 and assume the `onboarding-survey-tasks` Slack channel and the Slack MCP
+  connector are both available at run time.** If the Slack post itself fails, don't let that block
+  the rest of the run — note the failure in that member's Step 8 summary instead so the underlying
+  issue isn't lost even if the notification is.
 
 ---
 
